@@ -257,9 +257,140 @@ length(a)
 
 # STEPREPETIDO AIC
 
-source("funcion steprepetido.R")
+### CÓDIGO FUNCIÓN STEPREPETIDO ######
+# source("funcion steprepetido.R")
+
+steprepetido<- function(data=data,vardep="vardep",
+                        listconti="listconti",sinicio=12345,sfinal=12355,porcen=0.8,criterio="AIC")
+{
+  
+  library(MASS)
+  library(dplyr)
+  
+  resultados<-data.frame(c())
+  data<-data[,c(listconti,vardep)]
+  formu1<-formula(paste(vardep,"~.",sep=""))
+  formu2<-formula(paste(vardep,"~1",sep=""))
+  listamodelos<-list()
+  
+  for (semilla in sinicio:sfinal)
+  {
+    
+    set.seed(semilla)
+    sample <- sample.int(n = nrow(data),
+                         size = floor(porcen*nrow(data)), replace = F)
+    
+    train <- data[sample, ]
+    test  <- data[-sample, ]
+    
+    
+    full<-lm(formu1,data=train)
+    null<-lm(formu2,data=train)
+    
+    
+    if  (criterio=='AIC')
+    {
+      selec1<-stepAIC(null,scope=list(upper=full),direction="both",trace=FALSE)
+    } 
+    else   if  (criterio=='BIC')
+    {
+      k1=log(nrow(train))
+      selec1<-stepAIC(null,scope=list(upper=full),direction="both",k=k1,trace=FALSE)
+    }
+    
+    vec<-(names(selec1[[1]]))
+    
+    
+    # CAMBIOS
+    
+    cosa<-as.data.frame(table(vec))
+    cosa<-as.data.frame(t(cosa))
+    colnames(cosa)<-vec
+    
+    # 1) creo un vector con todas las variables input y ceros
+    # 2) voy añadiendo
+    
+    cosa<-cosa[2,]
+    cosa<-cosa[,-c(1)]
+    cosa<- data.frame(lapply(cosa, function(x) as.numeric(as.character(x))))
+    cosa$id<-semilla
+    
+    vectormodelo<-list(names(cosa),semilla)
+    listamodelos<-append(listamodelos,vectormodelo)  
+    
+    if (semilla==sinicio)
+    {
+      listamod<-cosa
+    }
+    
+    else if (semilla!=sinicio)
+    {
+      listamod<-suppressMessages(full_join(cosa,listamod,by = NULL, copy =TRUE))
+    }
+    
+  }
+  
+  listamod[is.na(listamod)] <- 0
+  
+  nom<-names(listamod)
+  listamod$modelo<-""
+  for (i in 1:nrow(listamod))
+  {
+    listamod[i,c("modelo")]<-""
+    listamod[i,c("contador")]=0
+    
+    for (vari in nom)
+    { 
+      if (listamod[i,vari]==1)
+      {
+        listamod[i,c("modelo")]<-paste(listamod[i,c("modelo")],vari,collapse="",sep="+")
+        listamod[i,c("contador")]=listamod[i,c("contador")]+1
+      }
+      
+    }
+    
+  }
+  
+  listamod$modelo<-substring(listamod$modelo, 2)
+  
+  tablamod<-as.data.frame(table(listamod$modelo))
+  names(tablamod)<-c("modelo","Freq")
+  
+  tablamod<-tablamod[order(-tablamod$Freq,tablamod$modelo),]
+  
+  nuevo<-listamod[,c("modelo","id","contador")]
+  
+  uni<-full_join(tablamod,nuevo,by ="modelo", copy =TRUE)
+  
+  uni= uni[!duplicated(uni$modelo),]
+  uni$semilla<-semilla
+  
+  li1<-list()
+  # str(listamodelos)
+  for (i in 1:nrow(uni))
+  {
+    for (j in 1:length(listamodelos))
+    {
+      if (any(uni[i,c("id")]==listamodelos[j][[1]]))
+      {
+        k<-as.vector(listamodelos[j-1][[1]])
+        length(k)<-length(k)-1
+        li1<-c(li1,list(k))
+        j=length(listamodelos)
+      }
+    } 
+    
+  }
+  
+  uni$semilla<-NULL
+  uni$id<-NULL
+  return(list(uni,li1))
+  
+}
 
 
+
+#### FIN CÓDIGO FUNCIÓN STEPREPTIDO #####
 lista<-steprepetido(data=archivo1,vardep=c("Pob_EV_Total"),
                     listconti=c("Eco_Afiliados_Tem_Porc_Resid","Eco_Afiliados_Total","Eco_Cap_Nec_Financ",
                                 "Eco_Contratos_Temp","Eco_Energ_Elect_PC","Eco_Establec_Hotel",
@@ -331,7 +462,178 @@ dput(lista[[2]][[2]])
 
 # COMPARACION VIA CV REPETIDA Y BOXPLOT
 
-source("cruzadas avnnet y lin.R")
+#### INICIO CÓDIGO FUNCIÓN CRUZADAS AVNNET Y LIN.R #####
+#source("cruzadas avnnet y lin.R")
+
+cruzadaavnnet<-
+  function(data=data,vardep="vardep",
+           listconti="listconti",listclass="listclass",
+           grupos=4,sinicio=1234,repe=5,
+           size=c(5),decay=c(0.01),repeticiones=5,itera=100,trace=FALSE)
+    
+  { 
+    library(caret)
+    
+    
+    
+    library(dummies)
+    
+    # Preparación del archivo
+    
+    # b)pasar las categóricas a dummies
+    
+    if (any(listclass==c(""))==FALSE)
+    {
+      databis<-data[,c(vardep,listconti,listclass)]
+      databis<- dummy.data.frame(databis, listclass, sep = ".")
+    }  else   {
+      databis<-data[,c(vardep,listconti)]
+    }
+    
+    # c)estandarizar las variables continuas
+    
+    # Calculo medias y dtipica de datos y estandarizo (solo las continuas)
+    
+    means <-apply(databis[,listconti],2,mean)
+    sds<-sapply(databis[,listconti],sd)
+    
+    # Estandarizo solo las continuas y uno con las categoricas
+    
+    datacon<-scale(databis[,listconti], center = means, scale = sds)
+    numerocont<-which(colnames(databis)%in%listconti)
+    databis<-cbind(datacon,databis[,-numerocont,drop=FALSE ])
+    
+    formu<-formula(paste(vardep,"~.",sep=""))
+    
+    # Preparo caret   
+    
+    set.seed(sinicio)
+    control<-trainControl(method = "repeatedcv",
+                          number=grupos,repeats=repe,
+                          savePredictions = "all") 
+    
+    # Aplico caret y construyo modelo
+    
+    avnnetgrid <-  expand.grid(size=size,decay=decay,bag=FALSE)
+    
+    avnnet<- train(formu,data=databis,
+                   method="avNNet",linout = TRUE,maxit=itera,repeats=repeticiones,
+                   trControl=control,tuneGrid=avnnetgrid,trace=trace)
+    
+    print(avnnet$results)
+    
+    preditest<-avnnet$pred
+    
+    preditest$prueba<-strsplit(preditest$Resample,"[.]")
+    preditest$Fold <- sapply(preditest$prueba, "[", 1)
+    preditest$Rep <- sapply(preditest$prueba, "[", 2)
+    preditest$prueba<-NULL
+    
+    preditest$error<-(preditest$pred-preditest$obs)^2
+    
+    
+    
+    tabla<-table(preditest$Rep)
+    listarep<-c(names(tabla))
+    medias<-data.frame()
+    for (repi in listarep) {
+      paso1<-preditest[which(preditest$Rep==repi),]
+      error=mean(paso1$error)  
+      medias<-rbind(medias,error)
+    }
+    names(medias)<-"error"
+    
+    
+    
+    return(medias)
+    
+  }
+
+cruzadalin<-
+  function(data=data,vardep="vardep",
+           listconti="listconti",listclass="listclass",
+           grupos=4,sinicio=1234,repe=5)
+    
+  { 
+    
+    library(caret)
+    
+    
+    library(dummies)
+    
+    # Preparación del archivo
+    
+    # b)pasar las categóricas a dummies
+    
+    if (any(listclass==c(""))==FALSE)
+    {
+      databis<-data[,c(vardep,listconti,listclass)]
+      databis<- dummy.data.frame(databis, listclass, sep = ".")
+    }  else   {
+      databis<-data[,c(vardep,listconti)]
+    }
+    
+    # c)estandarizar las variables continuas
+    
+    # Calculo medias y dtipica de datos y estandarizo (solo las continuas)
+    
+    means <-apply(databis[,listconti],2,mean)
+    sds<-sapply(databis[,listconti],sd)
+    
+    # Estandarizo solo las continuas y uno con las categoricas
+    
+    datacon<-scale(databis[,listconti], center = means, scale = sds)
+    numerocont<-which(colnames(databis)%in%listconti)
+    databis<-cbind(datacon,databis[,-numerocont,drop=FALSE ])
+    
+    formu<-formula(paste(vardep,"~.",sep=""))
+    
+    # Preparo caret   
+    
+    set.seed(sinicio)
+    control<-trainControl(method = "repeatedcv",
+                          number=grupos,repeats=repe,
+                          savePredictions = "all") 
+    
+    # Aplico caret y construyo modelo
+    
+    lineal<- train(formu,data=databis,
+                   method="lm",trControl=control)
+    
+    print(lineal$results)
+    
+    preditest<-lineal$pred
+    
+    preditest$prueba<-strsplit(preditest$Resample,"[.]")
+    preditest$Fold <- sapply(preditest$prueba, "[", 1)
+    preditest$Rep <- sapply(preditest$prueba, "[", 2)
+    preditest$prueba<-NULL
+    
+    preditest$error<-(preditest$pred-preditest$obs)^2
+    
+    
+    
+    
+    tabla<-table(preditest$Rep)
+    listarep<-c(names(tabla))
+    medias<-data.frame()
+    for (repi in listarep) {
+      paso1<-preditest[which(preditest$Rep==repi),]
+      error=mean(paso1$error)  
+      medias<-rbind(medias,error)
+    }
+    names(medias)<-"error"
+    
+    
+    
+    return(medias)
+    
+  }
+
+
+
+
+### FIN CÓDIGO FUNCIÓN CRUZADAS AVNNET Y LIN.R
 
 SCM_FINAL_SELML2 <- as.data.frame(SCM_FINAL_SELML2)
 
@@ -793,11 +1095,206 @@ plot(xgbm)
 varImp(xgbm)
 plot(varImp(xgbm))
 
-source("cruzada arbol continua.R")
-source("cruzadas avnnet y lin.R")
-source("cruzada rf continua.R")
-source("cruzada gbm continua.R")
-source("cruzada xgboost continua.R")
+### INICIO CÓDIGO FUNCIÓN GBM CONTINUA.R Y XGBOOST CONTINUA.R ####
+
+# source("cruzada gbm continua.R")
+# source("cruzada arbol continua.R")
+# source("cruzadas avnnet y lin.R")
+# source("cruzada rf continua.R")
+# source("cruzada xgboost continua.R")
+
+
+
+library(dummies)
+library(caret)
+
+
+
+
+cruzadagbm<-
+  function(data=data,vardep="vardep",
+           listconti="listconti",listclass="listclass",
+           grupos=4,sinicio=1234,repe=5,
+           n.minobsinnode=20,shrinkage=0.1,n.trees=100,interaction.depth=2)
+    
+  { 
+    
+    # Preparación del archivo
+    
+    # b)pasar las categóricas a dummies
+    
+    if (any(listclass==c(""))==FALSE)
+    {
+      databis<-data[,c(vardep,listconti,listclass)]
+      databis<- dummy.data.frame(databis, listclass, sep = ".")
+    }  else   {
+      databis<-data[,c(vardep,listconti)]
+    }
+    
+    # c)estandarizar las variables continuas
+    
+    # Calculo medias y dtipica de datos y estandarizo (solo las continuas)
+    
+    means <-apply(databis[,listconti],2,mean)
+    sds<-sapply(databis[,listconti],sd)
+    
+    # Estandarizo solo las continuas y uno con las categoricas
+    
+    datacon<-scale(databis[,listconti], center = means, scale = sds)
+    numerocont<-which(colnames(databis)%in%listconti)
+    databis<-cbind(datacon,databis[,-numerocont,drop=FALSE ])
+    
+    formu<-formula(paste(vardep,"~.",sep=""))
+    
+    # Preparo caret   
+    
+    set.seed(sinicio)
+    control<-trainControl(method = "repeatedcv",
+                          number=grupos,repeats=repe,
+                          savePredictions = "all") 
+    
+    # Aplico caret y construyo modelo
+    
+    # n.minobsinnode=20,shrinkage=0.1,n.trees=100,interaction.depth=2
+    
+    gbmgrid <-expand.grid(n.minobsinnode=n.minobsinnode,
+                          shrinkage=shrinkage,n.trees=n.trees,
+                          interaction.depth=interaction.depth)
+    
+    gbm<- train(formu,data=databis,
+                method="gbm",trControl=control,
+                tuneGrid=gbmgrid,distribution="gaussian",verbose=FALSE)
+    
+    print(gbm$results)
+    
+    preditest<-gbm$pred
+    
+    
+    preditest$prueba<-strsplit(preditest$Resample,"[.]")
+    preditest$Fold <- sapply(preditest$prueba, "[", 1)
+    preditest$Rep <- sapply(preditest$prueba, "[", 2)
+    preditest$prueba<-NULL
+    
+    preditest$error<-(preditest$pred-preditest$obs)^2
+    
+    
+    
+    
+    tabla<-table(preditest$Rep)
+    listarep<-c(names(tabla))
+    medias<-data.frame()
+    for (repi in listarep) {
+      paso1<-preditest[which(preditest$Rep==repi),]
+      error=mean(paso1$error)  
+      medias<-rbind(medias,error)
+    }
+    names(medias)<-"error"
+    
+    
+    
+    return(medias)
+    
+  }
+
+
+library(dummies)
+library(MASS)
+library(reshape)
+library(caret)
+
+
+
+
+cruzadaxgbm<-
+  function(data=data,vardep="vardep",
+           listconti="listconti",listclass="listclass",
+           grupos=4,sinicio=1234,repe=5,
+           min_child_weight=20,eta=0.1,nrounds=100,max_depth=2,
+           gamma=0,colsample_bytree=1,subsample=1,alpha=0,lambda=0)  
+  { 
+    library(caret)
+    
+    library(dummies)
+    
+    # Preparación del archivo
+    
+    # b)pasar las categóricas a dummies
+    
+    if (any(listclass==c(""))==FALSE)
+    {
+      databis<-data[,c(vardep,listconti,listclass)]
+      databis<- dummy.data.frame(databis, listclass, sep = ".")
+    }  else   {
+      databis<-data[,c(vardep,listconti)]
+    }
+    
+    # c)estandarizar las variables continuas
+    
+    # Calculo medias y dtipica de datos y estandarizo (solo las continuas)
+    
+    means <-apply(databis[,listconti],2,mean)
+    sds<-sapply(databis[,listconti],sd)
+    
+    # Estandarizo solo las continuas y uno con las categoricas
+    
+    datacon<-scale(databis[,listconti], center = means, scale = sds)
+    numerocont<-which(colnames(databis)%in%listconti)
+    databis<-cbind(datacon,databis[,-numerocont,drop=FALSE ])
+    
+    formu<-formula(paste(vardep,"~.",sep=""))
+    
+    # Preparo caret   
+    
+    set.seed(sinicio)
+    control<-trainControl(method = "repeatedcv",
+                          number=grupos,repeats=repe,
+                          savePredictions = "all") 
+    
+    # Aplico caret y construyo modelo
+    
+    xgbmgrid <-expand.grid( min_child_weight=min_child_weight,
+                            eta=eta,nrounds=nrounds,max_depth=max_depth,
+                            gamma=gamma,colsample_bytree=colsample_bytree,subsample=subsample)
+    
+    xgbm<- train(formu,data=databis,
+                 method="xgbTree",trControl=control,
+                 tuneGrid=xgbmgrid,verbose=FALSE,
+                 alpha=alpha,lambda=lambda)
+    
+    print(xgbm$results)
+    
+    preditest<-xgbm$pred
+    
+    
+    preditest$prueba<-strsplit(preditest$Resample,"[.]")
+    preditest$Fold <- sapply(preditest$prueba, "[", 1)
+    preditest$Rep <- sapply(preditest$prueba, "[", 2)
+    preditest$prueba<-NULL
+    
+    preditest$error<-(preditest$pred-preditest$obs)^2
+    
+    
+    
+    
+    tabla<-table(preditest$Rep)
+    listarep<-c(names(tabla))
+    medias<-data.frame()
+    for (repi in listarep) {
+      paso1<-preditest[which(preditest$Rep==repi),]
+      error=mean(paso1$error)  
+      medias<-rbind(medias,error)
+    }
+    names(medias)<-"error"
+    
+    
+    
+    
+    return(medias)
+    
+  }
+
+
+#### FIN CÓDIGO FUNCIÓN GBM CONTINUA.R Y XGBOOST CONTINUA.R ####
 
 medias9<-cruzadaxgbm(data=SCM_FINAL_SELML2,
                       vardep="Pob_EV_Total",listconti=c("Eco_Ind_RDBM_PC","Pob_Grupo.100001_500000_hab","Pob_Envejecimiento",
